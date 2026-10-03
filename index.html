@@ -1,7 +1,12 @@
 <!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
-<title>Warriors Rush — Medieval</title>
+<title>Pixel Rush</title>
+<meta name="theme-color" content="#040615">
+<meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Pixel Rush"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.json"><link rel="icon" type="image/png" href="favicon.png"><link rel="apple-touch-icon" href="apple-touch-icon.png">
+
 <style>
 :root{--bg:#120826;--fg:#fff}
 *{box-sizing:border-box;-webkit-user-select:none;user-select:none;touch-action:none}
@@ -573,47 +578,146 @@ body.play #joy{bottom:calc(84px + env(safe-area-inset-bottom,0px))!important}
 body.play #vit,body.play.villa #vit{left:24px!important;right:auto!important;bottom:calc(20px + env(safe-area-inset-bottom,0px))!important;transform:none!important;width:130px!important;box-sizing:border-box;padding:4px 7px 4px 4px;gap:5px}
 body.play #vit #hlv{min-width:28px;height:28px;font-size:9px}
 </style></head><body>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
 (function(){
 const SP=Storage.prototype,g0=SP.getItem,s0=SP.setItem,r0=SP.removeItem;
 const raw=k=>{try{return g0.call(localStorage,k)}catch(e){return null}};
 const rawSet=(k,v)=>{try{s0.call(localStorage,k,v)}catch(e){}};
-let db=null;try{db=JSON.parse(raw('wr_accts')||'null')}catch(e){}
-if(!db||!Array.isArray(db.list))db={next:1,list:[]};
+const rawDel=k=>{try{r0.call(localStorage,k)}catch(e){}};
+const FBC={apiKey:"AIzaSyC-OPoMVF2mndhm6nlcj0q6mlfth5nA_Ps",authDomain:"warriors-rush-d5df0.firebaseapp.com",projectId:"warriors-rush-d5df0",storageBucket:"warriors-rush-d5df0.firebasestorage.app",messagingSenderId:"303337600563",appId:"1:303337600563:web:78524fc893244b47fb1546",measurementId:"G-5W0S8NV671"};
+let fb=null,auth=null,fs=null;
+try{if(window.firebase){fb=window.firebase;fb.initializeApp(FBC);auth=fb.auth();fs=fb.firestore()}}catch(e){console.warn('Firebase indisponível',e);auth=null;fs=null}
 const pad=n=>String(n).padStart(5,'0');
-let cur=db.list.find(a=>a.id===(+raw('wr_sess')||0))||null;
+const idNum=s=>{let h=5381;for(let i=0;i<s.length;i++)h=((h<<5)+h+s.charCodeAt(i))>>>0;return h%100000};
+// sessão local: {uid,user}. O Firebase confirma em segundo plano.
+let cur=null;try{const s=JSON.parse(raw('wr_fbs')||'null');if(s&&s.uid&&s.user)cur=s}catch(e){}
+const NOSYNC=['afg_lite','afg_vol'];            // configurações que dependem do aparelho
+const syncable=k=>typeof k==='string'&&k.startsWith('afg_')&&NOSYNC.indexOf(k)<0;
+const pre=()=>'wr'+cur.uid+'_';
 // cada conta tem seu próprio save: as chaves afg_* ganham o prefixo da conta
-const pk=(o,k)=>{try{return(o===localStorage&&cur&&typeof k==='string'&&k.startsWith('afg_'))?'wr'+cur.id+'_'+k:k}catch(e){return k}};
+const pk=(o,k)=>{try{return(o===localStorage&&cur&&typeof k==='string'&&k.startsWith('afg_'))?pre()+k:k}catch(e){return k}};
+const mk=()=>'wrsync_'+cur.uid;
+function meta(){try{return JSON.parse(raw(mk())||'{}')||{}}catch(e){return{}}}
+function setMeta(m){rawSet(mk(),JSON.stringify(m))}
+let dirty=false,ready=false,busy=false,timer=null,lastPush=0,lastSig='';
+if(cur)dirty=!!meta().dirty;
+function markDirty(){if(!cur)return;if(!dirty){dirty=true;const m=meta();m.dirty=1;setMeta(m)}if(ready)schedule()}
+function schedule(){clearTimeout(timer);timer=setTimeout(()=>push(),Math.max(4000,15000-(Date.now()-lastPush)))}
 SP.getItem=function(k){return g0.call(this,pk(this,k))};
-SP.setItem=function(k,v){return s0.call(this,pk(this,k),v)};
-SP.removeItem=function(k){return r0.call(this,pk(this,k))};
-window.WRAUTH={id:cur?cur.id:0,idStr:cur?pad(cur.id):'',user:cur?cur.user:'',
- logout(){try{r0.call(localStorage,'wr_sess')}catch(e){}location.reload()}};
+SP.setItem=function(k,v){const r=s0.call(this,pk(this,k),v);if(this===localStorage&&cur&&syncable(k))markDirty();return r};
+SP.removeItem=function(k){const r=r0.call(this,pk(this,k));if(this===localStorage&&cur&&syncable(k))markDirty();return r};
+function collect(){const p=pre(),o={};for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(k&&k.startsWith(p)){const kk=k.slice(p.length);if(syncable(kk)){const v=raw(k);if(v!=null&&v.length<400000)o[kk]=v}}}return o}
+const hasLocal=()=>Object.keys(collect()).length>0;
+const docRef=()=>fs.collection('users').doc(cur.uid);
+async function pull(){
+ const s=await docRef().get();if(!s.exists)return false;
+ const d=s.data(),data=d.data||{},p=pre(),del=[];
+ for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(k&&k.startsWith(p)&&syncable(k.slice(p.length)))del.push(k)}
+ del.forEach(rawDel);
+ Object.keys(data).forEach(k=>{if(syncable(k)&&typeof data[k]==='string')rawSet(p+k,data[k])});
+ dirty=false;lastSig='';setMeta({rev:d.rev||0,dirty:0});return true}
+async function push(force){
+ if(!cur||!fs||!auth||!auth.currentUser||busy)return;
+ clearTimeout(timer);
+ const data=collect(),sig=JSON.stringify(data);
+ if(!force&&!dirty&&sig===lastSig)return;
+ busy=true;dirty=false;let res=null;
+ try{
+  res=await fs.runTransaction(async tx=>{
+   const ref=docRef(),s=await tx.get(ref),cr=s.exists?(s.data().rev||0):0;
+   if(cr>(meta().rev||0))return{conflict:1};
+   tx.set(ref,{user:cur.user,rev:cr+1,updatedAt:fb.firestore.FieldValue.serverTimestamp(),data});
+   return{rev:cr+1}});
+ }catch(e){console.warn('Falha ao salvar na nuvem',e);dirty=true;busy=false;if(ready)timer=setTimeout(()=>push(),30000);return}
+ busy=false;
+ if(res.conflict){dirty=true;await conflict();return}
+ lastSig=sig;lastPush=Date.now();setMeta({rev:res.rev,dirty:dirty?1:0});
+ if(dirty&&ready)schedule()}
+async function conflict(){
+ const useCloud=confirm('⚠️ O progresso salvo na nuvem é mais novo que o deste aparelho.\n\nOK = usar o da nuvem (perde o que mudou aqui)\nCancelar = manter este aparelho e sobrescrever a nuvem');
+ if(useCloud){await pull();location.reload();return}
+ const s=await docRef().get(),m=meta();m.rev=s.exists?(s.data().rev||0):0;setMeta(m);await push(true)}
+async function startSync(){
+ const u=await new Promise(res=>{const un=auth.onAuthStateChanged(x=>{un();res(x)})});
+ if(!u||u.uid!==cur.uid){rawDel('wr_fbs');location.reload();return}
+ const s=await docRef().get(),m=meta();
+ if(!s.exists){if(hasLocal())await push(true);return}
+ const cr=s.data().rev||0;
+ if(cr>(m.rev||0)){
+  if(dirty&&hasLocal())await conflict();
+  else{await pull();location.reload()}
+ }else if(dirty)await push()}
+function flushSoon(){if(cur&&dirty&&ready)push()}
+addEventListener('visibilitychange',()=>{if(document.hidden)flushSoon()});
+addEventListener('pagehide',flushSoon);
+addEventListener('online',flushSoon);
+window.WRAUTH={id:cur?idNum(cur.uid):0,idStr:cur?pad(idNum(cur.uid)):'',user:cur?cur.user:'',
+ async logout(){try{if(dirty)await Promise.race([push(true),new Promise(r=>setTimeout(r,3000))]);if(auth)await auth.signOut()}catch(e){}rawDel('wr_fbs');location.reload()}};
+// ---- contas antigas (só neste aparelho): usadas apenas para migrar ----
 async function hash(salt,pw,alg){const t=salt+':'+pw;
  if(alg!=='f'){try{const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(t));return{a:'s',h:[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}}catch(e){if(alg==='s')return{a:'s',h:''}}}
  let h=5381;for(let i=0;i<t.length;i++)h=((h<<5)+h+t.charCodeAt(i))>>>0;return{a:'f',h:h.toString(16)}}
 const okU=u=>/^[A-Za-z0-9_]{3,14}$/.test(u);
+const em=u=>u.toLowerCase()+'@warriorsrush.game';
+const fpw=p=>p+'#wr';
+function errMsg(e){const c=(e&&e.code)||'';
+ return({'auth/email-already-in-use':'Esse usuário já existe.','auth/weak-password':'Senha fraca. Use pelo menos 6 caracteres.','auth/user-not-found':'Usuário ou senha incorretos.','auth/wrong-password':'Usuário ou senha incorretos.','auth/invalid-credential':'Usuário ou senha incorretos.','auth/invalid-login-credentials':'Usuário ou senha incorretos.','auth/too-many-requests':'Muitas tentativas. Espere um pouco e tente de novo.','auth/network-request-failed':'Sem internet. Tente de novo.','auth/operation-not-allowed':'Login por Email/Senha não está ativado no Firebase.','auth/unauthorized-domain':'Este site não está autorizado no Firebase.'})[c]||('Erro: '+(c||(e&&e.message)||'desconhecido'))}
+const NOCON='Sem conexão com o servidor. Verifique a internet e recarregue a página.';
+function startSession(uid,user){cur={uid,user};rawSet('wr_fbs',JSON.stringify(cur))}
 async function create(u,p,p2){
  if(!okU(u))return{err:'Usuário: 3 a 14 letras, números ou _'};
- if(p.length<4)return{err:'A senha precisa ter pelo menos 4 caracteres.'};
+ if(p.length<6)return{err:'A senha precisa ter pelo menos 6 caracteres.'};
  if(p!==p2)return{err:'As senhas não são iguais.'};
- if(db.list.some(a=>a.user.toLowerCase()===u.toLowerCase()))return{err:'Esse usuário já existe.'};
- const id=db.next++,salt=Math.random().toString(36).slice(2)+Date.now().toString(36),r=await hash(salt,p);
- db.list.push({id,user:u,salt,alg:r.a,hash:r.h,at:Date.now()});rawSet('wr_accts',JSON.stringify(db));
- let mig=0;
- if(id===1){try{const ks=[];for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(k&&k.startsWith('afg_'))ks.push(k)}ks.forEach(k=>rawSet('wr1_'+k,raw(k)));mig=ks.length}catch(e){}}
- if(!raw('wr'+id+'_afg_prof'))rawSet('wr'+id+'_afg_prof',JSON.stringify({name:u,av:'🛡️',img:'',show:1,tag:1}));
- rawSet('wr_sess',String(id));return{id,mig}}
+ if(!auth)return{err:NOCON};
+ try{
+  const c=await auth.createUserWithEmailAndPassword(em(u),fpw(p));
+  try{await c.user.updateProfile({displayName:u})}catch(e){}
+  startSession(c.user.uid,u);
+  let mig=0;
+  try{if(!raw('wr_legacy_done')){const ks=[];for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(k&&k.startsWith('afg_'))ks.push(k)}ks.forEach(k=>rawSet(pre()+k,raw(k)));mig=ks.length;rawSet('wr_legacy_done','1')}}catch(e){}
+  if(!raw(pre()+'afg_prof'))rawSet(pre()+'afg_prof',JSON.stringify({name:u,av:'🛡️',img:'',show:1,tag:1}));
+  dirty=true;await push(true);
+  return{id:idNum(c.user.uid),mig}
+ }catch(e){return{err:errMsg(e)}}}
+async function legacy(u,p){
+ let old=null;try{old=JSON.parse(raw('wr_accts')||'null')}catch(e){}
+ const a=old&&Array.isArray(old.list)&&old.list.find(x=>x.user.toLowerCase()===u.toLowerCase());
+ if(!a)return null;
+ const r=await hash(a.salt,p,a.alg);if(r.h!==a.hash)return{err:'Usuário ou senha incorretos.'};
+ try{
+  const c=await auth.createUserWithEmailAndPassword(em(a.user),fpw(p));
+  try{await c.user.updateProfile({displayName:a.user})}catch(e){}
+  startSession(c.user.uid,a.user);
+  const op='wr'+a.id+'_',np=pre();
+  for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(k&&k.startsWith(op+'afg_'))rawSet(np+k.slice(op.length),raw(k))}
+  dirty=true;await push(true);
+  return{id:idNum(c.user.uid)}
+ }catch(e){return{err:errMsg(e)}}}
 async function login(u,p){
- const a=db.list.find(x=>x.user.toLowerCase()===u.toLowerCase());if(!a)return{err:'Usuário não encontrado.'};
- const r=await hash(a.salt,p,a.alg);if(r.h!==a.hash)return{err:'Senha incorreta.'};
- rawSet('wr_sess',String(a.id));return{id:a.id}}
+ if(!auth)return{err:NOCON};
+ if(!okU(u))return{err:'Usuário não encontrado.'};
+ let c;
+ try{c=await auth.signInWithEmailAndPassword(em(u),fpw(p))}
+ catch(e){
+  if(['auth/user-not-found','auth/invalid-credential','auth/invalid-login-credentials'].indexOf(e.code)>=0){const r=await legacy(u,p);if(r)return r}
+  return{err:errMsg(e)}}
+ startSession(c.user.uid,c.user.displayName||u);
+ if(!hasLocal()){try{await pull()}catch(e){console.warn(e)}}
+ return{id:idNum(c.user.uid)}}
 document.addEventListener('DOMContentLoaded',()=>{
  const $=i=>document.getElementById(i);
  if(cur){
-  const f=document.querySelector('.cfgv');if(f)f.textContent='👤 '+cur.user+' · 🆔 #'+pad(cur.id);
+  const f=document.querySelector('.cfgv');if(f)f.textContent='👤 '+cur.user+' · 🆔 #'+pad(idNum(cur.uid));
   const cx=$('cx');if(cx){const b=document.createElement('button');b.className='big sm';b.textContent='🚪 SAIR DA CONTA';b.onclick=()=>{if(confirm('Sair da conta '+cur.user+'?'))WRAUTH.logout()};cx.parentNode.insertBefore(b,cx)}
-  const mf=$('mfoot');if(mf){const s=document.createElement('span');s.textContent='🆔 #'+pad(cur.id);mf.appendChild(s)}
+  const mf=$('mfoot');if(mf){const s=document.createElement('span');s.textContent='🆔 #'+pad(idNum(cur.uid));mf.appendChild(s)}
+  if(!auth||!fs){ready=true;return}   // sem Firebase: joga com o save local
+  const ov=document.createElement('div');ov.style.cssText='position:fixed;inset:0;z-index:20001;display:flex;align-items:center;justify-content:center;background:#07030a;color:#ffd27a;font:800 16px Georgia,serif;letter-spacing:2px';ov.textContent='☁️ Sincronizando conta…';document.body.appendChild(ov);
+  const done=()=>{ready=true;if(ov.parentNode)ov.remove();if(dirty)schedule()};
+  const to=setTimeout(done,6000);
+  startSync().catch(e=>console.warn('Sync inicial falhou',e)).then(()=>{clearTimeout(to);done()});
   return}
  const st=document.createElement('style');st.textContent=`#wra{position:fixed;inset:0;z-index:20000;display:flex;align-items:center;justify-content:center;padding:12px;background:radial-gradient(ellipse at 50% 25%,#4a1c1a,#07030a);font-family:Georgia,serif;color:#fff;overflow:auto}
 #wra .c{width:min(92vw,380px);padding:20px 18px;border:2px solid #c9973f;border-radius:20px;background:linear-gradient(180deg,#2e1b0f,#170d07);box-shadow:0 18px 60px #000c;text-align:center}
@@ -638,11 +742,11 @@ document.addEventListener('DOMContentLoaded',()=>{
   +'<button class="go" id="wg">'+(mode==='in'?'▶ ENTRAR':'✨ CRIAR CONTA')+'</button></div>';
   if(err)w.querySelector('.er').textContent=err;
   w.querySelectorAll('.tb button').forEach(b=>b.onclick=()=>{mode=b.dataset.m;err='';draw()});
-  const go=async()=>{const u=$('wu').value.trim(),p=$('wp').value,g=$('wg');g.disabled=true;
+  const go=async()=>{const u=$('wu').value.trim(),p=$('wp').value,g=$('wg');g.disabled=true;g.textContent='⏳ Aguarde…';
    const r=mode==='in'?await login(u,p):await create(u,p,$('wp2').value);
    if(r.err){err=r.err;draw();$('wu').value=u;return}
    if(mode==='in')return location.reload();
-   w.innerHTML='<div class="c"><h1>CONTA CRIADA!</h1><small>Bem-vindo, '+u.replace(/[<>&]/g,'')+'</small><div>Sua ID</div><div class="id">'+pad(r.id)+'</div>'+(r.mig?'<small>Seu progresso anterior foi levado para esta conta.</small>':'<small>Guarde sua ID e sua senha.</small>')+'<button class="go" id="wc">▶ JOGAR</button></div>';
+   w.innerHTML='<div class="c"><h1>CONTA CRIADA!</h1><small>Bem-vindo, '+u.replace(/[<>&]/g,'')+'</small><div>Sua ID</div><div class="id">'+pad(r.id)+'</div>'+(r.mig?'<small>Seu progresso anterior foi levado para esta conta.</small>':'<small>Sua conta está salva na nuvem. Guarde seu usuário e senha.</small>')+'<button class="go" id="wc">▶ JOGAR</button></div>';
    $('wc').onclick=()=>location.reload()};
   $('wg').onclick=go;w.querySelectorAll('input').forEach(i=>i.onkeydown=e=>{if(e.key==='Enter')go()})}
  draw()});
@@ -3418,4 +3522,6 @@ $('tl').onclick=()=>{
 
 })();
 
-</script></body></html>
+</script>
+<script>if("serviceWorker"in navigator&&/^https?:$/.test(location.protocol))addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));</script>
+</body></html>
